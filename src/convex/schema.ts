@@ -127,6 +127,18 @@ const schema = defineSchema(
       recordedAt: v.number(), // server submission time
     }).index("complaintId", ["complaintId"]),
 
+    // ---- JalSakhi: anonymous community support ("I'm also facing this problem") ----
+    // Residents never log in, so a support is tied to an anonymous, non-identifying
+    // per-browser key. No personal information is stored or exposed.
+    supports: defineTable({
+      complaintId: v.id("complaints"),
+      sourceId: v.string(), // denormalised for grouping by water source
+      supportKey: v.string(), // anonymous, non-identifying device key (hashed client-side)
+      at: v.number(),
+    })
+      .index("complaintId", ["complaintId"])
+      .index("supportKey", ["supportKey"]),
+
     // ---- JalSakhi: resident final resolution feedback (no login; by complaint ID) ----
     residentFeedback: defineTable({
       complaintId: v.id("complaints"),

@@ -724,6 +724,146 @@ export const communityStats = query({
 });
 
 // ---------------------------------------------------------------------------
+// Community support ("I'm also facing this problem") — anonymous, no login.
+// Supports only strengthen the community signal; they never verify a complaint
+// or alter the Admin → Worker workflow.
+// ---------------------------------------------------------------------------
+
+/** Active = still moving through the workflow (not a terminal outcome). */
+function isActiveStatus(status: string): boolean {
+  return !["RESOLVED", "NOT_CONFIRMED"].includes(status);
+}
+
+/**
+ * Has this anonymous browser key already supported this complaint?
+ * Used for the "You reported this issue" state.
+ */
+export const mySupportedIds = query({
+  args: { supportKey: v.string() },
+  handler: async (ctx, { supportKey }) => {
+    const rows = await ctx.db
+      .query("supports")
+      .withIndex("supportKey", (q) => q.eq("supportKey", supportKey))
+      .collect();
+    return rows.map((s) => s.complaintId);
+  },
+});
+
+/**
+ * Add an anonymous support to an existing complaint — never creates a
+ * duplicate complaint. Idempotent per browser key.
+ */
+export const supportComplaint = mutation({
+  args: {
+    complaintId: v.id("complaints"),
+    supportKey: v.string(),
+  },
+  handler: async (ctx, { complaintId, supportKey }) => {
+    const complaint = await ctx.db.get(complaintId);
+    if (!complaint) throw new Error("Complaint not found.");
+    if (!isActiveStatus(complaint.status)) {
+      throw new Error("This complaint is already closed and cannot be supported.");
+    }
+    if (!supportKey.trim()) {
+      throw new Error("Missing browser key — please refresh the page and try again.");
+    }
+
+    const existing = await ctx.db
+      .query("supports")
+      .withIndex("complaintId", (q) => q.eq("complaintId", complaintId))
+      .collect();
+    if (existing.some((s) => s.supportKey === supportKey)) {
+      return { alreadySupported: true, count: existing.length + 1 };
+    }
+
+    await ctx.db.insert("supports", {
+      complaintId,
+      sourceId: complaint.sourceId,
+      supportKey: supportKey.trim(),
+      at: Date.now(),
+    });
+    await addEvent(
+      ctx,
+      complaintId,
+      complaint.status,
+      "Resident",
+      "Another resident confirmed they are facing the same problem (community support).",
+    );
+    return { alreadySupported: false, count: existing.length + 1 };
+  },
+});
+
+/**
+ * Active complaints for one water source for the resident's
+ * "My Area / Nearby Water Issues" section. Anonymous: no reporter data.
+ */
+export const communityList = query({
+  args: { sourceId: v.string() },
+  handler: async (ctx, { sourceId }) => {
+    const all = await ctx.db.query("complaints").collect();
+    const sourceComplaints = all.filter(
+      (c) => c.sourceId === sourceId && isActiveStatus(c.status),
+    );
+    // Most recent first — the freshest signals lead the list.
+    sourceComplaints.sort((a, b) => b.createdAt - a.createdAt);
+
+    const supports = await ctx.db.query("supports").collect();
+    const countByComplaint = new Map<string, number>();
+    for (const s of supports) {
+      countByComplaint.set(
+        s.complaintId,
+        (countByComplaint.get(s.complaintId) ?? 0) + 1,
+      );
+    }
+
+    return sourceComplaints.map((c) => ({
+      complaintId: c._id,
+      complaintNo: c.complaintNo,
+      sourceId: c.sourceId,
+      sourceName: c.sourceName,
+      landmark: c.landmark,
+      observations: c.observations,
+      description: c.description.slice(0, 160), // teaser only, no personal data
+      status: c.status,
+      riskLevel: c.riskLevel,
+      createdAt: c.createdAt,
+      affectedCount: 1 + (countByComplaint.get(c._id) ?? 0),
+    }));
+  },
+});
+
+/** Support counts per complaint — powers the Admin community-signal view. */
+export const communitySignal = query({
+  args: {},
+  handler: async (ctx) => {
+    const supports = await ctx.db.query("supports").collect();
+    const countByComplaint = new Map<string, number>();
+    for (const s of supports) {
+      countByComplaint.set(
+        s.complaintId,
+        (countByComplaint.get(s.complaintId) ?? 0) + 1,
+      );
+    }
+    return Array.from(countByComplaint.entries()).map(([complaintId, count]) => ({
+      complaintId,
+      supportCount: count,
+    }));
+  },
+});
+
+/** Anonymous support log for one complaint (Admin detail view) — timestamps only. */
+export const supportLog = query({
+  args: { complaintId: v.id("complaints") },
+  handler: async (ctx, { complaintId }) => {
+    const rows = await ctx.db
+      .query("supports")
+      .withIndex("complaintId", (q) => q.eq("complaintId", complaintId))
+      .collect();
+    return rows.sort((a, b) => b.at - a.at).map((s) => ({ at: s.at }));
+  },
+});
+
+// ---------------------------------------------------------------------------
 // Internal: seed a couple of demo complaints so dashboards are not empty
 // ---------------------------------------------------------------------------
 

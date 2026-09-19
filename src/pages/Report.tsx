@@ -12,14 +12,23 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { DisclaimerNote } from "@/components/StaffHeader";
 import { api } from "@/convex/_generated/api";
+import type { Id } from "@/convex/_generated/dataModel";
 import {
+  communitySignalLevel,
   computeRisk,
+  getMyComplaintNos,
+  getSupportKey,
+  observationLabel,
+  rememberMyComplaint,
+  statusBadgeClass,
+  statusLabel,
+  timeAgo,
   OBSERVATIONS,
   RISK_STYLES,
   WATER_SOURCES,
   type RiskLevel,
 } from "@/lib/jalsakhi";
-import { useMutation } from "convex/react";
+import { useMutation, useQuery } from "convex/react";
 import {
   AlertTriangle,
   CheckCircle2,
@@ -27,6 +36,7 @@ import {
   Droplets,
   ImageIcon,
   MapPin,
+  Users,
   Video,
 } from "lucide-react";
 import { useMemo, useRef, useState } from "react";
@@ -55,8 +65,18 @@ export default function Report() {
 
   const submitComplaint = useMutation(api.complaints.submit);
   const generateUploadUrl = useMutation(api.complaints.generateUploadUrl);
+  const supportComplaint = useMutation(api.complaints.supportComplaint);
   const photoInputRef = useRef<HTMLInputElement>(null);
   const videoInputRef = useRef<HTMLInputElement>(null);
+
+  // ---- Community support (anonymous, no login) ----
+  // All hooks live here, before the early return for the success screen.
+  const supportKey = useMemo(() => getSupportKey(), []);
+  const myComplaintNos = useMemo(() => getMyComplaintNos(), []);
+  const communityData = useQuery(api.complaints.communityList, { sourceId });
+  const mySupportedIds = useQuery(api.complaints.mySupportedIds, { supportKey });
+  const [supportBusyId, setSupportBusyId] = useState<string | null>(null);
+  const [supportError, setSupportError] = useState<string | null>(null);
 
   const source = WATER_SOURCES.find((s) => s.id === sourceId)!;
   const risk = useMemo(() => computeRisk(selected), [selected]);
@@ -136,11 +156,30 @@ export default function Report() {
         riskLevel: risk.level,
       });
       setResult({ complaintNo: res.complaintNo });
+      rememberMyComplaint(res.complaintNo);
       window.scrollTo({ top: 0, behavior: "smooth" });
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not submit the complaint.");
     } finally {
       setSubmitting(false);
+    }
+  };
+
+  /** Add this browser as a supporting resident for an existing complaint. */
+  const handleSupport = async (complaintId: Id<"complaints">) => {
+    setSupportBusyId(complaintId);
+    setSupportError(null);
+    try {
+      await supportComplaint({ complaintId, supportKey });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Could not record your support.";
+      setSupportError(
+        msg.includes("Uncaught Error:")
+          ? msg.split("Uncaught Error:")[1].split("\n")[0].trim()
+          : msg,
+      );
+    } finally {
+      setSupportBusyId(null);
     }
   };
 
@@ -315,6 +354,110 @@ export default function Report() {
                   </span>
                 </div>
               </div>
+            </CardContent>
+          </Card>
+
+          {/* Community section — support existing complaints instead of duplicates */}
+          <Card>
+            <CardHeader className="pb-3">
+              <div className="flex flex-wrap items-start justify-between gap-2">
+                <div>
+                  <CardTitle className="flex items-center gap-2 text-base">
+                    <Users className="size-4 text-primary" /> My Area / Nearby Water Issues
+                  </CardTitle>
+                  <CardDescription>
+                    Active complaints for <span className="font-medium text-foreground">{source.name}</span>. If you face the same problem, support the existing report instead of filing a duplicate.
+                  </CardDescription>
+                </div>
+              </div>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              {communityData === undefined ? (
+                <p className="py-3 text-center text-sm text-muted-foreground">
+                  Checking nearby issues…
+                </p>
+              ) : communityData.length === 0 ? (
+                <p className="rounded-lg border border-dashed p-4 text-sm text-muted-foreground">
+                  No active complaints for this water source yet. Your report below will be the first.
+                </p>
+              ) : (
+                <div className="space-y-3">
+                  {communityData.map((item) => {
+                    const mine =
+                      myComplaintNos.includes(item.complaintNo) ||
+                      (mySupportedIds ?? []).some(
+                        (id) => String(id) === String(item.complaintId),
+                      );
+                    const signal = communitySignalLevel(item.affectedCount);
+                    return (
+                      <div key={item.complaintId} className="rounded-lg border p-3">
+                        <div className="flex flex-wrap items-start justify-between gap-2">
+                          <div className="min-w-0">
+                            <p className="font-mono text-sm font-bold text-primary">
+                              {item.complaintNo}
+                            </p>
+                            <p className="mt-0.5 text-sm font-semibold leading-snug">
+                              {item.sourceName}
+                            </p>
+                            <p className="mt-0.5 flex items-center gap-1 text-xs text-muted-foreground">
+                              <MapPin className="size-3" /> {item.landmark}
+                            </p>
+                          </div>
+                          <span
+                            className={`shrink-0 rounded-full border px-2 py-0.5 text-[11px] font-semibold ${statusBadgeClass(item.status)}`}
+                          >
+                            {statusLabel(item.status)}
+                          </span>
+                        </div>
+                        <div className="mt-2 flex flex-wrap gap-1.5">
+                          {item.observations.map((o) => (
+                            <span
+                              key={o}
+                              className="rounded-full border bg-secondary px-2 py-0.5 text-xs"
+                            >
+                              {observationLabel(o)}
+                            </span>
+                          ))}
+                        </div>
+                        <div className="mt-2.5 flex flex-wrap items-center justify-between gap-2">
+                          <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+                            <span className="inline-flex items-center gap-1 rounded-full border bg-muted/60 px-2 py-0.5">
+                              <Users className="size-3" /> {item.affectedCount} resident{item.affectedCount > 1 ? "s" : ""} affected
+                            </span>
+                            <span className={`rounded-full border px-2 py-0.5 ${signal.chip}`}>{signal.label}</span>
+                            <span>· reported {timeAgo(item.createdAt)}</span>
+                          </div>
+                          {mine ? (
+                            <span className="inline-flex items-center gap-1 rounded-full border border-emerald-300 bg-emerald-50 px-2.5 py-1 text-xs font-medium text-emerald-800">
+                              <CheckCircle2 className="size-3.5" /> You reported this issue
+                            </span>
+                          ) : (
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="outline"
+                              disabled={supportBusyId === item.complaintId}
+                              onClick={() => handleSupport(item.complaintId)}
+                            >
+                              {supportBusyId === item.complaintId
+                                ? "Recording…"
+                                : "I'm also facing this problem"}
+                            </Button>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                  {supportError && (
+                    <p className="text-xs text-destructive" role="alert">
+                      {supportError}
+                    </p>
+                  )}
+                </div>
+              )}
+              <p className="text-xs text-muted-foreground">
+                Supporting an existing report strengthens its community signal for the water board office — it does not verify the complaint. Only the office's official verification process can do that.
+              </p>
             </CardContent>
           </Card>
 

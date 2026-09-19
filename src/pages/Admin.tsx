@@ -24,6 +24,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import {
+  communitySignalLevel,
   formatDateTime,
   observationLabel,
   RISK_STYLES,
@@ -45,6 +46,7 @@ import {
   MapPin,
   ShieldCheck,
   UserPlus,
+  Users,
   Video,
   Wrench,
   XCircle,
@@ -129,6 +131,7 @@ function RoleError() {
 function AdminDashboard({ session }: { session: StaffSession }) {
   const complaints = useQuery(api.complaints.adminList, { token: session.token });
   const workers = useQuery(api.staff.listWorkers);
+  const communitySignal = useQuery(api.complaints.communitySignal);
 
   const [detailId, setDetailId] = useState<Id<"complaints"> | null>(null);
   const detailRef = useRef<HTMLDivElement>(null);
@@ -144,6 +147,9 @@ function AdminDashboard({ session }: { session: StaffSession }) {
 
   const byGroup = (statuses: string[]) =>
     (complaints ?? []).filter((c) => statuses.includes(c.status));
+
+  const supportCountFor = (complaintId: string) =>
+    (communitySignal ?? []).find((s) => s.complaintId === complaintId)?.supportCount ?? 0;
 
   return (
     <div className="min-h-screen pb-14">
@@ -224,6 +230,18 @@ function AdminDashboard({ session }: { session: StaffSession }) {
                         >
                           {c.riskScore}/100
                         </span>
+                        {(() => {
+                          const count = 1 + supportCountFor(c._id);
+                          const signal = communitySignalLevel(count);
+                          return (
+                            <span
+                              className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 ${signal.chip}`}
+                            >
+                              <Users className="size-3" />
+                              {count} resident{count > 1 ? "s" : ""} affected
+                            </span>
+                          );
+                        })()}
                         <span>{c.observations.length} observations</span>
                         <span>· {timeAgo(c.createdAt)}</span>
                         {c.assignedWorkerName && <span>· {c.assignedWorkerName}</span>}
@@ -285,6 +303,8 @@ function ComplaintDetail({
     token: session.token,
     complaintId,
   });
+  // Anonymous community support log — timestamps only, never personal data.
+  const supports = useQuery(api.complaints.supportLog, { complaintId });
   const startReview = useMutation(api.complaints.startReview);
   const assignWorker = useMutation(api.complaints.assignWorker);
   const decideVerification = useMutation(api.complaints.decideVerification);
@@ -413,6 +433,61 @@ function ComplaintDetail({
             )}
           </div>
         </section>
+
+        {/* Community signal — reporting residents; NOT an Admin verification */}
+        {supports && (
+          <section className="space-y-2 rounded-lg border bg-stone-50/60 p-4">
+            <div className="flex flex-wrap items-center gap-2">
+              <Users className="size-4 text-stone-600" />
+              <p className="text-sm font-semibold">Community signal</p>
+              <span
+                className={`rounded-full border px-2 py-0.5 text-[11px] font-semibold ${
+                  communitySignalLevel(1 + supports.length).chip
+                }`}
+              >
+                {communitySignalLevel(1 + supports.length).label}
+              </span>
+            </div>
+            <p className="text-sm text-muted-foreground">
+              {1 + supports.length} resident{1 + supports.length === 1 ? "" : "s"} affected at{" "}
+              <span className="font-medium text-foreground">
+                {c.sourceName} — {c.landmark}
+              </span>
+              {" "}
+              (1 original report + {supports.length} supporting resident
+              {supports.length === 1 ? "" : "s"}).
+            </p>
+            {supports.length > 0 ? (
+              <div className="space-y-1">
+                <p className="text-xs font-medium text-stone-700">
+                  Individual supports (anonymous):
+                </p>
+                <ul className="space-y-0.5">
+                  <li className="text-xs text-muted-foreground">
+                    · Original report — {formatDateTime(c.createdAt)}
+                  </li>
+                  {supports.map((s, i) => (
+                    <li key={i} className="text-xs text-muted-foreground">
+                      · Supporting resident #{i + 1} — {formatDateTime(s.at)}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ) : (
+              <p className="text-xs text-muted-foreground">
+                No additional residents have supported this complaint yet. Other
+                residents of this water source can add their support from the
+                resident report page — supports raise awareness and priority but
+                never replace your verification.
+              </p>
+            )}
+            <p className="rounded-md border border-amber-200 bg-amber-50 p-2 text-xs text-amber-900">
+              Community support is not verification. The complaint must still
+              pass field verification and your final decision before any work
+              is assigned.
+            </p>
+          </section>
+        )}
 
         <Separator />
 
@@ -889,8 +964,6 @@ function ComplaintDetail({
             </section>
           </>
         )}
-
-        <Separator />
 
         <Separator />
 

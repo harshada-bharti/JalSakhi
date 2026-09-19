@@ -202,6 +202,67 @@ export const RISK_STYLES: Record<RiskLevel, { chip: string; dot: string; label: 
 };
 
 // ---------------------------------------------------------------------------
+// Community support: anonymous per-browser key + "my complaints" memory
+// ---------------------------------------------------------------------------
+
+/**
+ * Anonymous, non-identifying per-browser key used only to prevent the same
+ * browser from supporting the same complaint twice. Contains no personal
+ * information and cannot be linked to a resident. Residents never log in.
+ */
+export function getSupportKey(): string {
+  const KEY = "jalsakhi_support_key";
+  let key = localStorage.getItem(KEY);
+  if (!key) {
+    key =
+      typeof crypto !== "undefined" && "randomUUID" in crypto
+        ? crypto.randomUUID()
+        : `k-${Date.now()}-${Math.random().toString(36).slice(2)}-${Math.random().toString(36).slice(2)}`;
+    localStorage.setItem(KEY, key);
+  }
+  return key;
+}
+
+/** Complaint numbers this browser has reported or supported (localStorage). */
+export function getMyComplaintNos(): string[] {
+  try {
+    const raw = localStorage.getItem("jalsakhi_my_complaints");
+    const parsed = raw ? (JSON.parse(raw) as unknown) : [];
+    return Array.isArray(parsed) ? parsed.filter((x): x is string => typeof x === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+export function rememberMyComplaint(complaintNo: string) {
+  const mine = getMyComplaintNos();
+  if (!mine.includes(complaintNo)) {
+    localStorage.setItem(
+      "jalsakhi_my_complaints",
+      JSON.stringify([...mine, complaintNo]),
+    );
+  }
+}
+
+/** Community signal strength label derived from the affected-resident count. */
+export function communitySignalLevel(affectedCount: number): {
+  label: string;
+  chip: string;
+} {
+  if (affectedCount >= 5)
+    return { label: "Strong community signal", chip: "bg-red-50 text-red-800 border-red-200" };
+  if (affectedCount >= 3)
+    return {
+      label: "Growing community signal",
+      chip: "bg-amber-50 text-amber-800 border-amber-200",
+    };
+  return {
+    label: "Single resident report",
+    chip: "bg-stone-50 text-stone-600 border-stone-200",
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Staff session storage (worker / admin only — residents never sign in)
 // ---------------------------------------------------------------------------
 
