@@ -112,6 +112,9 @@ export const LIFECYCLE = [
   "FIELD_VERIFICATION",
   "VERIFIED",
   "IN_PROGRESS",
+  "WORK_COMPLETED",
+  "RESIDENT_CONFIRMATION",
+  "RESIDENT_CONFIRMED",
   "RESOLVED",
 ] as const;
 
@@ -121,12 +124,16 @@ export const STATUS_LABELS: Record<string, string> = {
   SUBMITTED: "Complaint Submitted",
   REVIEWING: "Admin Reviewing",
   WORKER_ASSIGNED: "Worker Assigned",
-  FIELD_VERIFICATION: "Field Verification",
-  VERIFIED: "Admin Verified",
+  FIELD_VERIFICATION: "Field Verified — Pending Admin Approval",
+  VERIFIED: "Action Approved",
   NOT_CONFIRMED: "Not Confirmed",
   NEEDS_INFO: "Needs More Information",
-  IN_PROGRESS: "Action in Progress",
-  RESOLVED: "Resolved",
+  IN_PROGRESS: "Pending Work (In Progress)",
+  WORK_COMPLETED: "Work Completed — Pending Admin Review",
+  RESIDENT_CONFIRMATION: "Awaiting Resident Confirmation",
+  RESIDENT_CONFIRMED: "Resolution Confirmed by Resident",
+  RECHECK_REQUIRED: "Resolution Failed — Recheck Required",
+  RESOLVED: "Closed / Resolved",
 };
 
 export const STATUS_BADGE_CLASSES: Record<string, string> = {
@@ -138,6 +145,10 @@ export const STATUS_BADGE_CLASSES: Record<string, string> = {
   NOT_CONFIRMED: "bg-stone-100 text-stone-700 border-stone-200",
   NEEDS_INFO: "bg-orange-50 text-orange-900 border-orange-200",
   IN_PROGRESS: "bg-yellow-100 text-yellow-900 border-yellow-300",
+  WORK_COMPLETED: "bg-cyan-50 text-cyan-900 border-cyan-200",
+  RESIDENT_CONFIRMATION: "bg-purple-50 text-purple-900 border-purple-200",
+  RESIDENT_CONFIRMED: "bg-green-100 text-green-900 border-green-300",
+  RECHECK_REQUIRED: "bg-red-50 text-red-900 border-red-200",
   RESOLVED: "bg-emerald-100 text-emerald-900 border-emerald-300",
 };
 
@@ -150,11 +161,13 @@ export function statusBadgeClass(status: string): string {
 }
 
 /**
- * Where the complaint sits on the 7-step resident lifecycle.
+ * Where the complaint sits on the resident lifecycle.
  * NOT_CONFIRMED / NEEDS_INFO map back to the stage just before verification.
+ * RECHECK_REQUIRED maps back to the work stage (worker must revisit).
  */
 export function lifecycleIndex(status: string): number {
   if (status === "NOT_CONFIRMED" || status === "NEEDS_INFO") return 3; // Field Verification
+  if (status === "RECHECK_REQUIRED") return 5; // Pending Work
   const idx = LIFECYCLE.indexOf(status as LifecycleStage);
   return idx >= 0 ? idx : 0;
 }

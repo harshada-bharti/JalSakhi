@@ -155,6 +155,10 @@ export const getForStaff = query({
       .query("resolutions")
       .withIndex("complaintId", (q) => q.eq("complaintId", complaintId))
       .collect();
+    const residentFeedback = await ctx.db
+      .query("residentFeedback")
+      .withIndex("complaintId", (q) => q.eq("complaintId", complaintId))
+      .collect();
     const events = await ctx.db
       .query("events")
       .withIndex("complaintId", (q) => q.eq("complaintId", complaintId))
@@ -166,6 +170,7 @@ export const getForStaff = query({
       verification: verifications.sort((a, b) => b.inspectedAt - a.inspectedAt)[0] ?? null,
       decision: decisions.sort((a, b) => b.decidedAt - a.decidedAt)[0] ?? null,
       resolutions: resolutions.sort((a, b) => b.recordedAt - a.recordedAt),
+      residentFeedback: residentFeedback.sort((a, b) => b.at - a.at),
       events: events.sort((a, b) => a.at - b.at),
     };
   },
@@ -393,18 +398,30 @@ export const assignResolution = mutation({
 // Worker: mark resolved with a resolution note / evidence
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Worker: mark work completed — MANDATORY completion evidence required
+// (geotagged photo + device GPS + automatic timestamp + completion note)
+// ---------------------------------------------------------------------------
+
 export const resolve = mutation({
   args: {
     token: v.string(),
     complaintId: v.id("complaints"),
     actionTaken: v.string(),
     note: v.string(),
-    photo: v.optional(v.id("_storage")),
+    photo: v.id("_storage"), // MANDATORY geotagged completion photo
     video: v.optional(v.id("_storage")),
+    latitude: v.number(), // device GPS — captured, never hand-entered
+    longitude: v.number(),
+    gpsAccuracy: v.optional(v.number()),
+    capturedAt: v.number(), // automatic device timestamp when GPS was captured
   },
-  handler: async (ctx, { token, complaintId, actionTaken, note, photo, video }) => {
+  handler: async (
+    ctx,
+    { token, complaintId, actionTaken, note, photo, video, latitude, longitude, gpsAccuracy, capturedAt },
+  ) => {
     const worker = await staffFromToken(ctx, token, "worker");
-    if (!worker) throw new Error("Only the assigned Worker can resolve a complaint.");
+    if (!worker) throw new Error("Only the assigned Worker can mark work completed.");
 
     const complaint = await ctx.db.get(complaintId);
     if (!complaint) throw new Error("Complaint not found.");
@@ -412,9 +429,33 @@ export const resolve = mutation({
       throw new Error("This complaint is not assigned to you.");
     }
     if (complaint.status !== "IN_PROGRESS") {
-      throw new Error("Admin must verify the complaint and assign the resolution first.");
+      throw new Error("Admin must verify the complaint and assign the work first.");
     }
-    if (!actionTaken.trim()) throw new Error("Describe the action taken.");
+    // ---- Mandatory evidence gate (server-side; the UI also enforces it) ----
+    if (!actionTaken.trim()) {
+      throw new Error("A completion note describing the work done is required.");
+    }
+    if (!photo) {
+      throw new Error(
+        "A geotagged completion photo is required before marking work completed.",
+      );
+    }
+    // Reject hand-entered / fake coordinates: the client must supply real
+    // device GPS values with a valid capture timestamp.
+    if (
+      !Number.isFinite(latitude) ||
+      !Number.isFinite(longitude) ||
+      Math.abs(latitude) > 90 ||
+      Math.abs(longitude) > 180 ||
+      (latitude === 0 && longitude === 0) ||
+      !Number.isFinite(capturedAt) ||
+      capturedAt <= 0 ||
+      Math.abs(Date.now() - capturedAt) > 10 * 60 * 1000
+    ) {
+      throw new Error(
+        "Valid device GPS location is required. Enable location access and capture your position on site.",
+      );
+    }
 
     await ctx.db.insert("resolutions", {
       complaintId,
@@ -424,15 +465,179 @@ export const resolve = mutation({
       note: note.trim(),
       photo,
       video,
+      latitude,
+      longitude,
+      gpsAccuracy,
+      locationSource: "device_gps" as const,
+      capturedAt,
       recordedAt: Date.now(),
     });
+    // Not RESOLVED yet: completion evidence must pass Admin review first.
+    await ctx.db.patch(complaintId, { status: "WORK_COMPLETED", updatedAt: Date.now() });
+    await addEvent(
+      ctx,
+      complaintId,
+      "WORK_COMPLETED",
+      `Worker (${worker.staffId})`,
+      `Work completed with mandatory evidence (photo + GPS ${latitude.toFixed(5)}, ${longitude.toFixed(5)}). Pending Admin review.`,
+    );
+    return true;
+  },
+});
+
+// ---------------------------------------------------------------------------
+// Admin: review the worker's completion evidence
+// — accept → resident confirmation stage, or reject → back to the worker
+// ---------------------------------------------------------------------------
+
+export const reviewCompletion = mutation({
+  args: {
+    token: v.string(),
+    complaintId: v.id("complaints"),
+    outcome: v.union(v.literal("ACCEPTED"), v.literal("REJECTED")),
+    note: v.string(),
+  },
+  handler: async (ctx, { token, complaintId, outcome, note }) => {
+    const admin = await staffFromToken(ctx, token, "admin");
+    if (!admin) throw new Error("Only Admin can review completion evidence.");
+
+    const complaint = await ctx.db.get(complaintId);
+    if (!complaint) throw new Error("Complaint not found.");
+    if (complaint.status !== "WORK_COMPLETED") {
+      throw new Error("Completion evidence is not awaiting review for this complaint.");
+    }
+
+    const resolutions = await ctx.db
+      .query("resolutions")
+      .withIndex("complaintId", (q) => q.eq("complaintId", complaintId))
+      .collect();
+    const latest = resolutions.sort((a, b) => b.recordedAt - a.recordedAt)[0];
+    if (!latest || !latest.photo || latest.locationSource !== "device_gps") {
+      throw new Error("No valid completion evidence was found — cannot accept the completion.");
+    }
+
+    if (outcome === "ACCEPTED") {
+      // Evidence accepted → the resident is now asked to confirm the fix.
+      await ctx.db.patch(complaintId, { status: "RESIDENT_CONFIRMATION", updatedAt: Date.now() });
+      await addEvent(
+        ctx,
+        complaintId,
+        "RESIDENT_CONFIRMATION",
+        `Admin (${admin.staffId})`,
+        `Completion evidence reviewed and accepted. Resident confirmation requested.${note.trim() ? ` Note: ${note.trim()}` : ""}`,
+      );
+    } else {
+      // Evidence insufficient → back to the worker with the Admin's reason.
+      await ctx.db.patch(complaintId, { status: "IN_PROGRESS", updatedAt: Date.now() });
+      await addEvent(
+        ctx,
+        complaintId,
+        "RECHECK_REQUIRED",
+        `Admin (${admin.staffId})`,
+        `Completion evidence rejected — work reopened for the worker.${note.trim() ? ` Reason: ${note.trim()}` : ""}`,
+      );
+    }
+    return true;
+  },
+});
+
+// ---------------------------------------------------------------------------
+// Resident (no login): final resolution feedback, keyed by complaint ID
+// ---------------------------------------------------------------------------
+
+export const residentConfirmation = mutation({
+  args: {
+    complaintNo: v.string(),
+    resolved: v.boolean(),
+  },
+  handler: async (ctx, { complaintNo, resolved }) => {
+    const rows = await ctx.db
+      .query("complaints")
+      .withIndex("complaintNo", (q) => q.eq("complaintNo", complaintNo.trim().toUpperCase()))
+      .collect();
+    const complaint = rows[0];
+    if (!complaint) throw new Error("Complaint not found.");
+    if (complaint.status !== "RESIDENT_CONFIRMATION") {
+      throw new Error(
+        "This complaint is not yet asking for resident confirmation. Confirmation opens only after the work completion evidence is reviewed.",
+      );
+    }
+    await ctx.db.insert("residentFeedback", {
+      complaintId: complaint._id,
+      resolved,
+      at: Date.now(),
+    });
+    await ctx.db.patch(complaint._id, {
+      status: resolved ? "RESIDENT_CONFIRMED" : "RECHECK_REQUIRED",
+      updatedAt: Date.now(),
+    });
+    await addEvent(
+      ctx,
+      complaint._id,
+      resolved ? "RESIDENT_CONFIRMED" : "RECHECK_REQUIRED",
+      "Resident",
+      resolved
+        ? "Resident confirmed the problem is resolved. Admin can now close the complaint."
+        : "Resident reported the problem still exists. Recheck required — Admin to decide next action.",
+    );
+    return true;
+  },
+});
+
+// ---------------------------------------------------------------------------
+// Admin: final close (only after resident confirmation) + reopen for recheck
+// ---------------------------------------------------------------------------
+
+export const closeComplaint = mutation({
+  args: {
+    token: v.string(),
+    complaintId: v.id("complaints"),
+    note: v.string(),
+  },
+  handler: async (ctx, { token, complaintId, note }) => {
+    const admin = await staffFromToken(ctx, token, "admin");
+    if (!admin) throw new Error("Only Admin can close a complaint.");
+    const complaint = await ctx.db.get(complaintId);
+    if (!complaint) throw new Error("Complaint not found.");
+    if (complaint.status !== "RESIDENT_CONFIRMED") {
+      throw new Error(
+        "A complaint can be closed only after the resident confirms the issue is resolved.",
+      );
+    }
     await ctx.db.patch(complaintId, { status: "RESOLVED", updatedAt: Date.now() });
     await addEvent(
       ctx,
       complaintId,
       "RESOLVED",
-      `Worker (${worker.staffId})`,
-      `Issue resolved: ${actionTaken.trim()}`,
+      `Admin (${admin.staffId})`,
+      `Complaint closed as resolved.${note.trim() ? ` Note: ${note.trim()}` : ""} Resident and worker have been notified.`,
+    );
+    return true;
+  },
+});
+
+export const reopenForRecheck = mutation({
+  args: {
+    token: v.string(),
+    complaintId: v.id("complaints"),
+    note: v.string(),
+  },
+  handler: async (ctx, { token, complaintId, note }) => {
+    const admin = await staffFromToken(ctx, token, "admin");
+    if (!admin) throw new Error("Only Admin can reopen a complaint for recheck.");
+    const complaint = await ctx.db.get(complaintId);
+    if (!complaint) throw new Error("Complaint not found.");
+    if (complaint.status !== "RECHECK_REQUIRED") {
+      throw new Error("Only complaints with a resident recheck request can be reopened.");
+    }
+    if (!complaint.assignedWorkerId) throw new Error("No worker is assigned to this complaint.");
+    await ctx.db.patch(complaintId, { status: "IN_PROGRESS", updatedAt: Date.now() });
+    await addEvent(
+      ctx,
+      complaintId,
+      "IN_PROGRESS",
+      `Admin (${admin.staffId})`,
+      `Complaint reopened — ${complaint.assignedWorkerName} must revisit and complete the work again.${note.trim() ? ` Note: ${note.trim()}` : ""}`,
     );
     return true;
   },
@@ -464,6 +669,18 @@ export const trackByComplaintNo = query({
       .query("resolutions")
       .withIndex("complaintId", (q) => q.eq("complaintId", complaint._id))
       .collect();
+    const residentFeedback = await ctx.db
+      .query("residentFeedback")
+      .withIndex("complaintId", (q) => q.eq("complaintId", complaint._id))
+      .collect();
+
+    // Completion evidence is shown on the tracking page only once the Admin
+    // has reviewed it (status past WORK_COMPLETED) — never while pending.
+    const evidencePublic =
+      complaint.status !== "WORK_COMPLETED" &&
+      complaint.status !== "IN_PROGRESS" &&
+      resolutions.length > 0;
+    const latestResolution = resolutions.sort((a, b) => b.recordedAt - a.recordedAt)[0] ?? null;
 
     return {
       complaint: {
@@ -480,7 +697,15 @@ export const trackByComplaintNo = query({
       },
       events: events.sort((a, b) => a.at - b.at),
       decision: decisions.sort((a, b) => b.decidedAt - a.decidedAt)[0] ?? null,
-      resolution: resolutions.sort((a, b) => b.recordedAt - a.recordedAt)[0] ?? null,
+      resolution:
+        evidencePublic && latestResolution
+          ? {
+              actionTaken: latestResolution.actionTaken,
+              recordedAt: latestResolution.recordedAt,
+              photo: latestResolution.photo,
+            }
+          : null,
+      latestFeedback: residentFeedback.sort((a, b) => b.at - a.at)[0] ?? null,
     };
   },
 });

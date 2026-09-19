@@ -2,6 +2,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { DisclaimerNote } from "@/components/StaffHeader";
+import { MediaView } from "@/components/Media";
 import { api } from "@/convex/_generated/api";
 import {
   formatDateTime,
@@ -12,7 +13,7 @@ import {
   statusLabel,
   type RiskLevel,
 } from "@/lib/jalsakhi";
-import { useQuery } from "convex/react";
+import { useMutation, useQuery } from "convex/react";
 import {
   ArrowLeft,
   CheckCircle2,
@@ -20,6 +21,8 @@ import {
   ClipboardList,
   Loader2,
   Search,
+  ThumbsDown,
+  ThumbsUp,
 } from "lucide-react";
 import { useState } from "react";
 import { Link, useSearchParams } from "react-router";
@@ -30,8 +33,10 @@ const LIFECYCLE_STEPS = [
   "Worker Assigned",
   "Field Verification",
   "Admin Verified",
-  "Action in Progress",
-  "Resolved",
+  "Pending Work",
+  "Work Completed",
+  "Resident Confirmation",
+  "Closed / Resolved",
 ];
 
 /** Resident-facing status message in plain language. */
@@ -46,15 +51,23 @@ function residentNotice(status: string): string {
     case "FIELD_VERIFICATION":
       return "The field worker has inspected the spot. The office will decide next.";
     case "VERIFIED":
-      return "The office has confirmed the problem. A fix is being arranged.";
+      return "The office has approved the action. The assigned worker will carry out the fix.";
     case "NOT_CONFIRMED":
       return "The inspection did not confirm this problem. The office has recorded its decision.";
     case "NEEDS_INFO":
       return "The office needs more information. If you left a phone number, staff may contact you.";
     case "IN_PROGRESS":
-      return "The fix is underway. The assigned worker will update the status when done.";
+      return "The fix is underway. The assigned worker must submit completion evidence (photo + GPS) before the office reviews it.";
+    case "WORK_COMPLETED":
+      return "The worker has marked the work completed with evidence. The office is reviewing it now.";
+    case "RESIDENT_CONFIRMATION":
+      return "The work has been reviewed by the office. Please confirm below whether the problem is actually resolved.";
+    case "RESIDENT_CONFIRMED":
+      return "Thank you — you confirmed the problem is resolved. The office will close the complaint.";
+    case "RECHECK_REQUIRED":
+      return "You reported the problem still exists. The office has been notified and will arrange a recheck.";
     case "RESOLVED":
-      return "This complaint has been marked resolved. Thank you for reporting it.";
+      return "Your reported issue has been resolved and the complaint has been closed. Thank you for reporting it.";
     default:
       return "Status updates will appear here.";
   }
@@ -70,17 +83,51 @@ export default function Track() {
     submittedId.trim() ? { complaintNo: submittedId.trim() } : "skip",
   );
 
+  const residentConfirmation = useMutation(api.complaints.residentConfirmation);
+
+  const [feedbackDone, setFeedbackDone] = useState(false);
+  const [feedbackError, setFeedbackError] = useState<string | null>(null);
+  const [feedbackBusy, setFeedbackBusy] = useState(false);
+
   const handleSearch = (e: React.FormEvent) => {
     e.preventDefault();
     setSubmittedId(complaintNo.trim());
+    setFeedbackDone(false);
+    setFeedbackError(null);
   };
 
   const complaint = data?.complaint ?? null;
 
+  const submitFeedback = async (resolved: boolean) => {
+    if (!submittedId.trim()) return;
+    setFeedbackBusy(true);
+    setFeedbackError(null);
+    try {
+      await residentConfirmation({ complaintNo: submittedId.trim(), resolved });
+      setFeedbackDone(true);
+    } catch (err) {
+      const msg =
+        err instanceof Error ? err.message : "Could not submit your response.";
+      setFeedbackError(
+        msg.includes("Uncaught Error:")
+          ? msg.split("Uncaught Error:")[1].split("\n")[0].trim()
+          : msg,
+      );
+    } finally {
+      setFeedbackBusy(false);
+    }
+  };
+
+  const canConfirm =
+    complaint?.status === "RESIDENT_CONFIRMATION" && !feedbackDone;
+
   return (
     <div className="min-h-screen px-4 py-8">
       <div className="mx-auto max-w-3xl space-y-6">
-        <Link to="/" className="inline-flex items-center gap-1.5 text-sm font-medium text-primary hover:underline">
+        <Link
+          to="/"
+          className="inline-flex items-center gap-1.5 text-sm font-medium text-primary hover:underline"
+        >
           <ArrowLeft className="size-4" /> JalSakhi home
         </Link>
 
@@ -114,8 +161,11 @@ export default function Track() {
           <Card className="border-dashed">
             <CardContent className="pt-6 text-center text-sm text-muted-foreground">
               No complaint found with ID{" "}
-              <span className="font-mono font-semibold text-foreground">{submittedId}</span>.
-              Check the ID — it looks like <span className="font-mono">JS-000001</span>.
+              <span className="font-mono font-semibold text-foreground">
+                {submittedId}
+              </span>
+              . Check the ID — it looks like{" "}
+              <span className="font-mono">JS-000001</span>.
             </CardContent>
           </Card>
         )}
@@ -130,9 +180,12 @@ export default function Track() {
                     <p className="font-mono text-lg font-bold text-primary">
                       {complaint.complaintNo}
                     </p>
-                    <CardTitle className="mt-1 text-base">{complaint.sourceName}</CardTitle>
+                    <CardTitle className="mt-1 text-base">
+                      {complaint.sourceName}
+                    </CardTitle>
                     <p className="mt-0.5 text-sm text-muted-foreground">
-                      {complaint.landmark} · reported {formatDateTime(complaint.createdAt)}
+                      {complaint.landmark} · reported{" "}
+                      {formatDateTime(complaint.createdAt)}
                     </p>
                   </div>
                   <div className="flex flex-col items-end gap-1.5">
@@ -186,8 +239,78 @@ export default function Track() {
                     </p>
                   )}
                 </div>
+
+                {/* Resident final confirmation — only after evidence review */}
+                {canConfirm && (
+                  <div className="space-y-2 rounded-lg border border-purple-200 bg-purple-50/50 p-3">
+                    <p className="text-sm font-medium">
+                      Was your reported problem actually resolved?
+                    </p>
+                    <p className="text-xs text-muted-foreground">
+                      The worker's completion evidence has been reviewed by the
+                      office. Only you can confirm whether the issue is truly
+                      fixed. This does not verify your original complaint — you
+                      are only confirming the resolution.
+                    </p>
+                    <div className="flex flex-wrap gap-2">
+                      <Button
+                        type="button"
+                        size="sm"
+                        disabled={feedbackBusy}
+                        onClick={() => submitFeedback(true)}
+                      >
+                        <ThumbsUp className="size-4" /> Yes, problem resolved
+                      </Button>
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        disabled={feedbackBusy}
+                        onClick={() => submitFeedback(false)}
+                      >
+                        <ThumbsDown className="size-4" /> No, problem still exists
+                      </Button>
+                    </div>
+                    {feedbackError && (
+                      <p className="text-xs text-destructive">{feedbackError}</p>
+                    )}
+                  </div>
+                )}
+
+                {feedbackDone && data.latestFeedback && (
+                  <div className="rounded-lg border bg-muted/40 p-3 text-sm">
+                    <p className="font-medium">Your response was recorded.</p>
+                    <p className="mt-0.5 text-muted-foreground">
+                      {data.latestFeedback.resolved
+                        ? "You confirmed the problem is resolved. The office can now close the complaint."
+                        : "You reported the problem still exists. The office has been notified for a recheck."}
+                    </p>
+                  </div>
+                )}
               </CardContent>
             </Card>
+
+            {/* Completion evidence preview (only after Admin review) */}
+            {data.resolution?.photo && (
+              <Card>
+                <CardHeader className="pb-3">
+                  <CardTitle className="text-base">
+                    Work completion evidence
+                  </CardTitle>
+                </CardHeader>
+                <CardContent className="space-y-2">
+                  <MediaView
+                    storageId={data.resolution.photo as never}
+                    kind="image"
+                    label="Completion photo"
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    Submitted by the assigned worker and reviewed by the water
+                    board office before this confirmation step.
+                  </p>
+                </CardContent>
+              </Card>
+            )}
 
             {/* Lifecycle timeline */}
             <Card>
@@ -201,7 +324,8 @@ export default function Track() {
                     const done = idx < currentIdx;
                     const isCurrent = idx === currentIdx;
                     const isTerminal =
-                      complaint.status === "RESOLVED" && idx === LIFECYCLE_STEPS.length - 1;
+                      complaint.status === "RESOLVED" &&
+                      idx === LIFECYCLE_STEPS.length - 1;
                     return (
                       <li key={step} className="flex gap-3">
                         <div className="flex flex-col items-center">
@@ -224,7 +348,11 @@ export default function Track() {
                         <div className="pb-5">
                           <p
                             className={`text-sm font-medium ${
-                              isCurrent ? "text-primary" : done || isTerminal ? "" : "text-muted-foreground"
+                              isCurrent
+                                ? "text-primary"
+                                : done || isTerminal
+                                  ? ""
+                                  : "text-muted-foreground"
                             }`}
                           >
                             {step}
@@ -235,7 +363,8 @@ export default function Track() {
                   })}
                 </ol>
                 <p className="text-xs text-muted-foreground">
-                  {complaint.status === "NOT_CONFIRMED" || complaint.status === "NEEDS_INFO"
+                  {complaint.status === "NOT_CONFIRMED" ||
+                  complaint.status === "NEEDS_INFO"
                     ? "The office decision is shown above — the field report did not lead to confirmation at this time."
                     : `Last updated ${formatDateTime(complaint.updatedAt)}`}
                 </p>

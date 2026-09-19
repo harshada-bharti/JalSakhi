@@ -76,15 +76,25 @@ const QUEUE_GROUPS: { key: string; title: string; statuses: string[] }[] = [
   },
   {
     key: "verification",
-    title: "Field verification — awaiting final decision",
+    title: "Field verified — pending admin approval",
     statuses: ["FIELD_VERIFICATION"],
   },
   {
     key: "confirmed",
-    title: "Verified — assign resolution",
+    title: "Action approved — assign resolution",
     statuses: ["VERIFIED"],
   },
-  { key: "progress", title: "Action in progress", statuses: ["IN_PROGRESS"] },
+  { key: "progress", title: "Pending work — with the worker", statuses: ["IN_PROGRESS"] },
+  {
+    key: "completion",
+    title: "Work completion evidence — needs your review",
+    statuses: ["WORK_COMPLETED"],
+  },
+  {
+    key: "resident",
+    title: "Resident confirmation & recheck",
+    statuses: ["RESIDENT_CONFIRMATION", "RESIDENT_CONFIRMED", "RECHECK_REQUIRED"],
+  },
   { key: "closed", title: "Closed", statuses: ["RESOLVED", "NOT_CONFIRMED", "NEEDS_INFO"] },
 ];
 
@@ -279,6 +289,9 @@ function ComplaintDetail({
   const assignWorker = useMutation(api.complaints.assignWorker);
   const decideVerification = useMutation(api.complaints.decideVerification);
   const assignResolution = useMutation(api.complaints.assignResolution);
+  const reviewCompletion = useMutation(api.complaints.reviewCompletion);
+  const closeComplaint = useMutation(api.complaints.closeComplaint);
+  const reopenForRecheck = useMutation(api.complaints.reopenForRecheck);
 
   const [workerChoice, setWorkerChoice] = useState<string>("");
   const [decision, setDecision] = useState<
@@ -287,6 +300,9 @@ function ComplaintDetail({
   const [decisionNote, setDecisionNote] = useState("");
   const [actionRequired, setActionRequired] = useState("");
   const [resolutionNote, setResolutionNote] = useState("");
+  const [reviewNote, setReviewNote] = useState("");
+  const [closeNote, setCloseNote] = useState("");
+  const [reopenNote, setReopenNote] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -308,6 +324,7 @@ function ComplaintDetail({
     verification,
     decision: existingDecision,
     resolutions,
+    residentFeedback,
     events,
   } = data;
   const c = complaint as Complaint;
@@ -677,17 +694,203 @@ function ComplaintDetail({
                   {r.note && (
                     <p className="text-muted-foreground">Note: {r.note}</p>
                   )}
+                  {/* Mandatory completion evidence block */}
+                  <div className="mt-2 space-y-2 rounded-lg border bg-card p-3">
+                    <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                      Completion evidence
+                    </p>
+                    {r.photo ? (
+                      <MediaView storageId={r.photo} kind="image" label="Completion photo" />
+                    ) : (
+                      <p className="text-xs text-destructive">No completion photo attached.</p>
+                    )}
+                    <div className="grid gap-0.5 text-xs">
+                      {typeof r.latitude === "number" && typeof r.longitude === "number" ? (
+                        <>
+                          <span>
+                            Latitude: <span className="font-mono font-medium">{r.latitude.toFixed(6)}</span>
+                          </span>
+                          <span>
+                            Longitude: <span className="font-mono font-medium">{r.longitude.toFixed(6)}</span>
+                          </span>
+                          {typeof r.gpsAccuracy === "number" && (
+                            <span>Accuracy: ±{Math.round(r.gpsAccuracy)} m</span>
+                          )}
+                          <span>
+                            Location captured: {" "}
+                            {typeof r.capturedAt === "number"
+                              ? formatDateTime(r.capturedAt)
+                              : "unknown"}{" "}
+                            · device GPS
+                          </span>
+                        </>
+                      ) : (
+                        <span className="text-xs text-destructive">
+                          No device GPS location recorded.
+                        </span>
+                      )}
+                    </div>
+                  </div>
                 </div>
               ))}
+              {c.status === "WORK_COMPLETED" && (
+                <div className="space-y-2 rounded-lg border border-cyan-200 bg-cyan-50/50 p-3">
+                  <p className="text-sm font-medium">
+                    Review the completion evidence above before proceeding.
+                  </p>
+                  <p className="text-xs text-muted-foreground">
+                    The geotagged photo, GPS location, timestamp and completion
+                    note are mandatory. Rejecting sends the work back to the
+                    worker; accepting asks the resident to confirm the fix.
+                  </p>
+                  <Textarea
+                    value={reviewNote}
+                    onChange={(e) => setReviewNote(e.target.value)}
+                    placeholder="Review note (optional) — reason if rejecting."
+                    rows={2}
+                  />
+                  <div className="flex flex-wrap gap-2">
+                    <Button
+                      type="button"
+                      size="sm"
+                      disabled={busy}
+                      onClick={() =>
+                        run(async () => {
+                          await reviewCompletion({
+                            token: session.token,
+                            complaintId,
+                            outcome: "ACCEPTED",
+                            note: reviewNote,
+                          });
+                          setReviewNote("");
+                        })
+                      }
+                    >
+                      <CheckCircle2 className="size-4" /> Accept evidence — ask resident to confirm
+                    </Button>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      disabled={busy}
+                      onClick={() =>
+                        run(async () => {
+                          await reviewCompletion({
+                            token: session.token,
+                            complaintId,
+                            outcome: "REJECTED",
+                            note: reviewNote,
+                          });
+                          setReviewNote("");
+                        })
+                      }
+                    >
+                      <XCircle className="size-4" /> Reject — send back to worker
+                    </Button>
+                  </div>
+                </div>
+              )}
+              {/* Resident feedback + final close / recheck actions */}
+              {residentFeedback.length > 0 && (
+                <div className="rounded-lg border bg-purple-50/50 p-3 text-sm">
+                  <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                    Resident final response
+                  </p>
+                  {residentFeedback.map((f, i) => (
+                    <p key={i} className="mt-1">
+                      {f.resolved ? (
+                        <span className="font-medium text-green-800">
+                          YES — problem resolved
+                        </span>
+                      ) : (
+                        <span className="font-medium text-red-800">
+                          NO — problem still exists
+                        </span>
+                      )}{" "}
+                      <span className="text-xs text-muted-foreground">
+                        · {formatDateTime(f.at)}
+                      </span>
+                    </p>
+                  ))}
+                </div>
+              )}
+              {c.status === "RESIDENT_CONFIRMED" && (
+                <div className="space-y-2 rounded-lg border border-green-300 bg-green-50/60 p-3">
+                  <p className="text-sm font-medium text-green-900">
+                    The resident confirmed the issue is resolved. You can now
+                    close this complaint.
+                  </p>
+                  <Input
+                    value={closeNote}
+                    onChange={(e) => setCloseNote(e.target.value)}
+                    placeholder="Closing note (optional)"
+                  />
+                  <Button
+                    type="button"
+                    size="sm"
+                    disabled={busy}
+                    onClick={() =>
+                      run(async () => {
+                        await closeComplaint({
+                          token: session.token,
+                          complaintId,
+                          note: closeNote,
+                        });
+                        setCloseNote("");
+                      })
+                    }
+                  >
+                    <ShieldCheck className="size-4" /> Mark closed / resolved
+                  </Button>
+                </div>
+              )}
+              {c.status === "RECHECK_REQUIRED" && (
+                <div className="space-y-2 rounded-lg border border-red-200 bg-red-50/60 p-3">
+                  <p className="text-sm font-medium text-red-900">
+                    The resident reported the problem still exists.
+                  </p>
+                  <Input
+                    value={reopenNote}
+                    onChange={(e) => setReopenNote(e.target.value)}
+                    placeholder="Recheck instruction for the worker (optional)"
+                  />
+                  <Button
+                    type="button"
+                    size="sm"
+                    disabled={busy}
+                    onClick={() =>
+                      run(async () => {
+                        await reopenForRecheck({
+                          token: session.token,
+                          complaintId,
+                          note: reopenNote,
+                        });
+                        setReopenNote("");
+                      })
+                    }
+                  >
+                    <Wrench className="size-4" /> Reopen work for the same worker
+                  </Button>
+                </div>
+              )}
+              {c.status === "RESIDENT_CONFIRMATION" && (
+                <p className="text-sm text-muted-foreground">
+                  Waiting for the resident to confirm whether the problem is
+                  resolved (via the complaint tracking page, no login needed).
+                </p>
+              )}
               {c.status === "IN_PROGRESS" && resolutions.length === 0 && (
                 <p className="text-sm text-muted-foreground">
-                  Waiting for the worker to carry out the action and update the
-                  complaint to Resolved.
+                  Waiting for the worker to carry out the action and mark the
+                  work completed with mandatory evidence.
+                  {c.assignedWorkerName ? ` (${c.assignedWorkerName})` : ""}
                 </p>
               )}
             </section>
           </>
         )}
+
+        <Separator />
 
         <Separator />
 

@@ -69,6 +69,10 @@ const schema = defineSchema(
         v.literal("NOT_CONFIRMED"),
         v.literal("NEEDS_INFO"),
         v.literal("IN_PROGRESS"),
+        v.literal("WORK_COMPLETED"), // Work Completed — pending Admin evidence review
+        v.literal("RESIDENT_CONFIRMATION"), // evidence reviewed → resident asked to confirm
+        v.literal("RESIDENT_CONFIRMED"),
+        v.literal("RECHECK_REQUIRED"),
         v.literal("RESOLVED"),
       ),
       assignedWorkerId: v.optional(v.string()), // staff table _id as string
@@ -105,16 +109,29 @@ const schema = defineSchema(
       decidedAt: v.number(),
     }).index("complaintId", ["complaintId"]),
 
-    // ---- JalSakhi: resolution records (worker work + admin note) ----
+    // ---- JalSakhi: worker completion evidence (mandatory for WORK COMPLETED) ----
     resolutions: defineTable({
       complaintId: v.id("complaints"),
       workerId: v.string(),
       workerName: v.string(),
-      actionTaken: v.string(),
+      actionTaken: v.string(), // mandatory completion note describing the work done
       note: v.string(),
-      photo: v.optional(v.id("_storage")),
+      photo: v.optional(v.id("_storage")), // mandatory geotagged completion photo
       video: v.optional(v.id("_storage")),
-      recordedAt: v.number(),
+      // Mandatory device GPS capture — never entered manually by the worker.
+      latitude: v.optional(v.number()),
+      longitude: v.optional(v.number()),
+      gpsAccuracy: v.optional(v.number()), // metres
+      locationSource: v.optional(v.literal("device_gps")),
+      capturedAt: v.optional(v.number()), // automatic device/GPS timestamp (ms)
+      recordedAt: v.number(), // server submission time
+    }).index("complaintId", ["complaintId"]),
+
+    // ---- JalSakhi: resident final resolution feedback (no login; by complaint ID) ----
+    residentFeedback: defineTable({
+      complaintId: v.id("complaints"),
+      resolved: v.boolean(), // YES, problem resolved / NO, problem still exists
+      at: v.number(),
     }).index("complaintId", ["complaintId"]),
 
     // ---- JalSakhi: lifecycle timeline events ----

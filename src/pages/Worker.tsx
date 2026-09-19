@@ -30,6 +30,7 @@ import { useMutation, useQuery } from "convex/react";
 import {
   AlertTriangle,
   BadgeCheck,
+  Camera,
   CheckCircle2,
   ClipboardCheck,
   ImageIcon,
@@ -39,7 +40,7 @@ import {
   Wrench,
   XCircle,
 } from "lucide-react";
-import { useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 const MAX_PHOTO_BYTES = 5 * 1024 * 1024;
 const MAX_VIDEO_BYTES = 16 * 1024 * 1024;
@@ -102,6 +103,10 @@ function WorkerDashboard({ session }: { session: StaffSession }) {
   const needsResolution = (complaints ?? []).filter(
     (c) => c.status === "IN_PROGRESS",
   );
+  const pendingAdminReview = (complaints ?? []).filter((c) =>
+    ["WORK_COMPLETED", "RESIDENT_CONFIRMATION", "RESIDENT_CONFIRMED"].includes(c.status),
+  );
+  const recheck = (complaints ?? []).filter((c) => c.status === "RECHECK_REQUIRED");
   const closed = (complaints ?? []).filter((c) =>
     ["RESOLVED", "NOT_CONFIRMED"].includes(c.status),
   );
@@ -115,7 +120,8 @@ function WorkerDashboard({ session }: { session: StaffSession }) {
             <h1 className="text-2xl font-bold tracking-tight">Worker dashboard</h1>
             <p className="mt-1 text-sm text-muted-foreground">
               Only complaints assigned to you are shown. Inspect the location,
-              submit your field verification, and carry out assigned fixes.
+              submit your field verification, and complete the assigned work
+              with mandatory evidence.
             </p>
           </div>
           <Badge variant="outline" className="border-indigo-200 bg-indigo-50 text-indigo-900">
@@ -140,7 +146,9 @@ function WorkerDashboard({ session }: { session: StaffSession }) {
           <>
             {[
               { title: "To inspect & verify", items: needsVerification },
-              { title: "Fix in progress", items: needsResolution },
+              { title: "Pending work — carry out the fix", items: needsResolution },
+              { title: "Work completed — pending Admin review", items: pendingAdminReview },
+              { title: "Recheck requested", items: recheck },
               { title: "Closed", items: closed },
             ]
               .filter((g) => g.items.length > 0)
@@ -207,7 +215,7 @@ function WorkerDashboard({ session }: { session: StaffSession }) {
           <Card className="border-dashed">
             <CardContent className="py-10 text-center text-sm text-muted-foreground">
               Select a complaint above to see the full details, submit your field
-              verification, or update the fix.
+              verification, or complete the assigned work.
             </CardContent>
           </Card>
         )}
@@ -219,7 +227,7 @@ function WorkerDashboard({ session }: { session: StaffSession }) {
 }
 
 // ---------------------------------------------------------------------------
-// Assigned complaint detail: verification report + resolution updates
+// Assigned complaint detail: verification report + completion with evidence
 // ---------------------------------------------------------------------------
 
 function AssignedComplaint({
@@ -257,6 +265,18 @@ function AssignedComplaint({
   const [resolveNote, setResolveNote] = useState("");
   const [resolvePhoto, setResolvePhoto] = useState<File | null>(null);
   const [resolveVideo, setResolveVideo] = useState<File | null>(null);
+  // Mandatory completion evidence: real device GPS (never hand-entered),
+  // automatic capture time, geotagged photo, and a completion note.
+  const [gpsStatus, setGpsStatus] = useState<
+    "idle" | "capturing" | "captured" | "denied" | "unavailable" | "timeout"
+  >("idle");
+  const [gpsCoords, setGpsCoords] = useState<{
+    latitude: number;
+    longitude: number;
+    accuracy?: number;
+    capturedAt: number;
+  } | null>(null);
+  const [gpsMessage, setGpsMessage] = useState<string | null>(null);
 
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -323,6 +343,82 @@ function AssignedComplaint({
   const canVerify = ["WORKER_ASSIGNED", "NEEDS_INFO"].includes(c.status);
 
   const canResolve = c.status === "IN_PROGRESS";
+
+  // ---- Mandatory completion-evidence capture (device GPS only) ----
+
+  const captureGps = useCallback(() => {
+    if (!("geolocation" in navigator)) {
+      setGpsStatus("unavailable");
+      setGpsMessage(
+        "Location services are not available on this device/browser. Work cannot be marked completed without a real GPS location.",
+      );
+      return;
+    }
+    setGpsStatus("capturing");
+    setGpsMessage("Capturing your current GPS location…");
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        setGpsCoords({
+          latitude: pos.coords.latitude,
+          longitude: pos.coords.longitude,
+          accuracy: pos.coords.accuracy ?? undefined,
+          capturedAt: pos.timestamp || Date.now(),
+        });
+        setGpsStatus("captured");
+        setGpsMessage(
+          `Location captured (±${Math.round(pos.coords.accuracy ?? 0)} m accuracy) at ${new Date(
+            pos.timestamp || Date.now(),
+          ).toLocaleTimeString()}.`,
+        );
+      },
+      (err) => {
+        if (err.code === err.PERMISSION_DENIED) {
+          setGpsStatus("denied");
+          setGpsMessage(
+            "Location permission was denied. Enable location access in your browser settings — work cannot be marked completed without a real GPS location.",
+          );
+        } else if (err.code === err.POSITION_UNAVAILABLE) {
+          setGpsStatus("unavailable");
+          setGpsMessage(
+            "Your location could not be determined. Move to an open area or enable device location services and try again.",
+          );
+        } else {
+          setGpsStatus("timeout");
+          setGpsMessage("Location capture timed out. Please try again.");
+        }
+      },
+      { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 },
+    );
+  }, []);
+
+  // Fresh capture each time the completion form opens; reset on close.
+  useEffect(() => {
+    if (showResolveForm && canResolve) {
+      setGpsCoords(null);
+      setGpsStatus("idle");
+      setGpsMessage(null);
+      captureGps();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showResolveForm, canResolve, captureGps]);
+
+  // All required evidence must be provided before WORK COMPLETED unlocks.
+  const evidenceComplete =
+    gpsStatus === "captured" &&
+    gpsCoords !== null &&
+    resolvePhoto !== null &&
+    actionTaken.trim().length > 0;
+
+  const resetCompletionForm = () => {
+    setShowResolveForm(false);
+    setActionTaken("");
+    setResolveNote("");
+    setResolvePhoto(null);
+    setResolveVideo(null);
+    setGpsCoords(null);
+    setGpsStatus("idle");
+    setGpsMessage(null);
+  };
 
   return (
     <Card>
@@ -626,7 +722,10 @@ function AssignedComplaint({
         </section>
 
         {/* Resolution */}
-        {(c.status === "IN_PROGRESS" || resolutions.length > 0) && (
+        {(c.status === "IN_PROGRESS" ||
+          c.status === "WORK_COMPLETED" ||
+          c.status === "RECHECK_REQUIRED" ||
+          resolutions.length > 0) && (
           <>
             <Separator />
             <section className="space-y-3">
@@ -642,6 +741,19 @@ function AssignedComplaint({
                       </p>
                       <p className="mt-0.5">Action taken: {r.actionTaken}</p>
                       {r.note && <p className="text-muted-foreground">Note: {r.note}</p>}
+                      <div className="mt-1.5 flex flex-wrap items-center gap-3 text-xs text-muted-foreground">
+                        {r.photo && (
+                          <MediaView storageId={r.photo} kind="image" label="Completion photo" />
+                        )}
+                        {typeof r.latitude === "number" && typeof r.longitude === "number" && (
+                          <span className="font-mono">
+                            GPS {r.latitude.toFixed(5)}, {r.longitude.toFixed(5)}
+                            {typeof r.capturedAt === "number"
+                              ? ` · captured ${formatDateTime(r.capturedAt)}`
+                              : ""}
+                          </span>
+                        )}
+                      </div>
                     </div>
                   ))}
                 </div>
@@ -651,7 +763,8 @@ function AssignedComplaint({
                   <div className="space-y-3 rounded-lg border p-4">
                     <div className="space-y-1.5">
                       <Label htmlFor="actionTaken">
-                        What action did you take? <span className="text-destructive">*</span>
+                        Completion note — what work was done?{" "}
+                        <span className="text-destructive">*</span>
                       </Label>
                       <Textarea
                         id="actionTaken"
@@ -671,76 +784,170 @@ function AssignedComplaint({
                         rows={2}
                       />
                     </div>
-                    <div className="flex gap-2">
-                      <label className="inline-flex cursor-pointer items-center gap-1.5 rounded-md border px-3 py-1.5 text-sm hover:bg-muted">
-                        <ImageIcon className="size-4" /> Photo evidence
-                        <input
-                          type="file"
-                          accept="image/*"
-                          className="hidden"
-                          onChange={(e) => {
-                            const f = e.target.files?.[0];
-                            setResolvePhoto(null);
-                            if (f) pickFile(f, MAX_PHOTO_BYTES, "Photo", setResolvePhoto);
-                          }}
+                    <div className="space-y-1.5">
+                      <Label>
+                        Geotagged completion photo <span className="text-destructive">*</span>
+                      </Label>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <label className="inline-flex cursor-pointer items-center gap-1.5 rounded-md border px-3 py-1.5 text-sm hover:bg-muted">
+                          <Camera className="size-4" />
+                          {resolvePhoto ? "Change photo" : "Take / choose photo"}
+                          <input
+                            type="file"
+                            accept="image/*"
+                            capture="environment"
+                            className="hidden"
+                            onChange={(e) => {
+                              const f = e.target.files?.[0];
+                              setResolvePhoto(null);
+                              if (f) pickFile(f, MAX_PHOTO_BYTES, "Photo", setResolvePhoto);
+                            }}
+                          />
+                        </label>
+                        <label className="inline-flex cursor-pointer items-center gap-1.5 rounded-md border px-3 py-1.5 text-sm hover:bg-muted">
+                          <Video className="size-4" /> Video (optional)
+                          <input
+                            type="file"
+                            accept="video/*"
+                            className="hidden"
+                            onChange={(e) => {
+                              const f = e.target.files?.[0];
+                              setResolveVideo(null);
+                              if (f) pickFile(f, MAX_VIDEO_BYTES, "Video", setResolveVideo);
+                            }}
+                          />
+                        </label>
+                      </div>
+                      {resolvePhoto ? (
+                        <img
+                          src={URL.createObjectURL(resolvePhoto)}
+                          alt="Completion photo preview"
+                          className="max-h-36 rounded-lg border object-contain"
                         />
-                      </label>
-                      <label className="inline-flex cursor-pointer items-center gap-1.5 rounded-md border px-3 py-1.5 text-sm hover:bg-muted">
-                        <Video className="size-4" /> Video evidence
-                        <input
-                          type="file"
-                          accept="video/*"
-                          className="hidden"
-                          onChange={(e) => {
-                            const f = e.target.files?.[0];
-                            setResolveVideo(null);
-                            if (f) pickFile(f, MAX_VIDEO_BYTES, "Video", setResolveVideo);
-                          }}
-                        />
-                      </label>
+                      ) : (
+                        <p className="text-xs text-muted-foreground">
+                          Required — a photo of the completed work, taken on site.
+                        </p>
+                      )}
                     </div>
-                    {resolvePhoto && (
-                      <p className="text-xs text-muted-foreground">Photo attached ✓</p>
-                    )}
-                    {resolveVideo && (
-                      <p className="text-xs text-muted-foreground">Video attached ✓</p>
-                    )}
-                    <div className="flex gap-2">
+                    <div className="space-y-1.5 rounded-lg border bg-muted/40 p-3">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <Label className="flex items-center gap-1.5">
+                          <MapPin className="size-4" /> GPS location at completion{" "}
+                          <span className="text-destructive">*</span>
+                        </Label>
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          disabled={gpsStatus === "capturing"}
+                          onClick={captureGps}
+                        >
+                          {gpsStatus === "capturing"
+                            ? "Capturing…"
+                            : gpsCoords
+                              ? "Re-capture location"
+                              : "Capture location"}
+                        </Button>
+                      </div>
+                      {gpsMessage && (
+                        <p
+                          className={`text-xs ${
+                            gpsStatus === "captured"
+                              ? "text-emerald-700"
+                              : gpsStatus === "denied" || gpsStatus === "unavailable"
+                                ? "text-destructive"
+                                : "text-muted-foreground"
+                          }`}
+                        >
+                          {gpsMessage}
+                        </p>
+                      )}
+                      {gpsCoords && (
+                        <div className="grid gap-0.5 text-xs">
+                          <span>
+                            Latitude:{" "}
+                            <span className="font-mono font-medium">
+                              {gpsCoords.latitude.toFixed(6)}
+                            </span>
+                          </span>
+                          <span>
+                            Longitude:{" "}
+                            <span className="font-mono font-medium">
+                              {gpsCoords.longitude.toFixed(6)}
+                            </span>
+                          </span>
+                          {gpsCoords.accuracy != null && (
+                            <span>Accuracy: ±{Math.round(gpsCoords.accuracy)} m</span>
+                          )}
+                          <span className="text-muted-foreground">
+                            Location captured: {formatDateTime(gpsCoords.capturedAt)} · automatic
+                            device GPS (cannot be entered manually)
+                          </span>
+                        </div>
+                      )}
+                      {!gpsCoords && gpsStatus !== "capturing" && (
+                        <p className="text-xs text-muted-foreground">
+                          The location is captured automatically from this device's GPS. It cannot
+                          be typed in manually.
+                        </p>
+                      )}
+                    </div>
+                    <div className="flex flex-wrap gap-2">
                       <Button
                         type="button"
-                        disabled={busy || !actionTaken.trim()}
+                        disabled={busy || !evidenceComplete}
+                        title={
+                          evidenceComplete
+                            ? undefined
+                            : "All mandatory evidence is needed first: geotagged photo, GPS location, and completion note."
+                        }
                         onClick={() =>
                           run(async () => {
+                            if (!resolvePhoto || !gpsCoords) return;
+                            const photoId = (await uploadFile(resolvePhoto)) as never;
                             await resolveComplaint({
                               token: session.token,
                               complaintId,
                               actionTaken,
                               note: resolveNote,
-                              photo: resolvePhoto ? ((await uploadFile(resolvePhoto)) as never) : undefined,
+                              photo: photoId,
                               video: resolveVideo ? ((await uploadFile(resolveVideo)) as never) : undefined,
+                              latitude: gpsCoords.latitude,
+                              longitude: gpsCoords.longitude,
+                              gpsAccuracy: gpsCoords.accuracy,
+                              capturedAt: gpsCoords.capturedAt,
                             });
-                            setShowResolveForm(false);
+                            resetCompletionForm();
                           })
                         }
                       >
-                        <CheckCircle2 className="size-4" /> Mark as Resolved
+                        <CheckCircle2 className="size-4" /> Mark work completed
                       </Button>
                       <Button
                         type="button"
                         variant="ghost"
                         disabled={busy}
-                        onClick={() => setShowResolveForm(false)}
+                        onClick={resetCompletionForm}
                       >
                         Cancel
                       </Button>
                     </div>
+                    {!evidenceComplete && (
+                      <p className="text-xs text-muted-foreground">
+                        "Mark work completed" stays disabled until the geotagged photo, GPS
+                        location, and completion note are all provided.
+                      </p>
+                    )}
                   </div>
                 ) : (
                   <div className="rounded-lg border border-dashed p-4 text-sm">
                     <p className="text-muted-foreground">
-                      The office has verified this complaint and assigned the fix
-                      to you. Carry out the required action, then update the
-                      complaint to Resolved with a note and optional evidence.
+                      The office has approved this work and it is in your Pending
+                      Work list. Carry out the required action on site, then mark
+                      it completed with mandatory evidence: a geotagged photo,
+                      your device GPS location, automatic date & time, and a
+                      completion note describing what work was done.
                     </p>
                     <Button
                       type="button"
@@ -748,16 +955,20 @@ function AssignedComplaint({
                       className="mt-3"
                       onClick={() => setShowResolveForm(true)}
                     >
-                      <Wrench className="size-4" /> Update / resolve
+                      <Wrench className="size-4" /> Update / mark work completed
                     </Button>
                   </div>
                 )
               ) : (
-                resolutions.length === 0 && (
-                  <p className="text-sm text-muted-foreground">
-                    The Admin has not yet assigned the resolution work.
-                  </p>
-                )
+                <p className="text-sm text-muted-foreground">
+                  {c.status === "WORK_COMPLETED"
+                    ? "Completion evidence submitted — the Admin will review your photo, GPS location, timestamp, and note before the resident is asked to confirm."
+                    : c.status === "RECHECK_REQUIRED"
+                      ? "The resident reported the issue still exists. The Admin will reopen this work — revisit the site and complete it again with fresh evidence."
+                      : resolutions.length === 0
+                        ? "The Admin has not yet assigned the resolution work."
+                        : null}
+                </p>
               )}
             </section>
           </>
