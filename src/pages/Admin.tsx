@@ -386,7 +386,8 @@ function ComplaintDetail({
             <p className="rounded-lg border bg-muted/40 p-3 text-sm leading-relaxed">
               {c.description}
             </p>
-          )}          <div className="flex flex-wrap gap-4">
+          )}
+          <div className="flex flex-wrap gap-4">
             {c.photo && (
               <MediaView storageId={c.photo} kind="image" label="Resident photo" />
             )}

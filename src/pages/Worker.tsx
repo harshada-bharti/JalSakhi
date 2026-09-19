@@ -319,9 +319,8 @@ function AssignedComplaint({
     }
   };
 
-  const canVerify =
-    ["WORKER_ASSIGNED", "NEEDS_INFO"].includes(c.status) ||
-    (c.status === "FIELD_VERIFICATION" && false); // one report per round
+  // One verification report per round; a new one can follow a NEEDS_INFO request.
+  const canVerify = ["WORKER_ASSIGNED", "NEEDS_INFO"].includes(c.status);
 
   const canResolve = c.status === "IN_PROGRESS";
 
