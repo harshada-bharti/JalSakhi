@@ -282,6 +282,68 @@ function AssignedComplaint({
   const [error, setError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  // ---- Mandatory completion-evidence capture (device GPS only) ----
+  // Hooks must be called unconditionally BEFORE any early return below,
+  // otherwise React throws "Rendered more hooks than during the previous
+  // render" once the query resolves.
+
+  const captureGps = useCallback(() => {
+    if (!("geolocation" in navigator)) {
+      setGpsStatus("unavailable");
+      setGpsMessage(
+        "Location services are not available on this device/browser. Work cannot be marked completed without a real GPS location.",
+      );
+      return;
+    }
+    setGpsStatus("capturing");
+    setGpsMessage("Capturing your current GPS location…");
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        setGpsCoords({
+          latitude: pos.coords.latitude,
+          longitude: pos.coords.longitude,
+          accuracy: pos.coords.accuracy ?? undefined,
+          capturedAt: pos.timestamp || Date.now(),
+        });
+        setGpsStatus("captured");
+        setGpsMessage(
+          `Location captured (±${Math.round(pos.coords.accuracy ?? 0)} m accuracy) at ${new Date(
+            pos.timestamp || Date.now(),
+          ).toLocaleTimeString()}.`,
+        );
+      },
+      (err) => {
+        if (err.code === err.PERMISSION_DENIED) {
+          setGpsStatus("denied");
+          setGpsMessage(
+            "Location permission was denied. Enable location access in your browser settings — work cannot be marked completed without a real GPS location.",
+          );
+        } else if (err.code === err.POSITION_UNAVAILABLE) {
+          setGpsStatus("unavailable");
+          setGpsMessage(
+            "Your location could not be determined. Move to an open area or enable device location services and try again.",
+          );
+        } else {
+          setGpsStatus("timeout");
+          setGpsMessage("Location capture timed out. Please try again.");
+        }
+      },
+      { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 },
+    );
+  }, []);
+
+  // Fresh capture each time the completion form opens; reset on close.
+  // The IN_PROGRESS check uses optional chaining so this is safe while the
+  // query is still loading (data undefined) or failed (data null).
+  useEffect(() => {
+    if (showResolveForm && data?.complaint?.status === "IN_PROGRESS") {
+      setGpsCoords(null);
+      setGpsStatus("idle");
+      setGpsMessage(null);
+      captureGps();
+    }
+  }, [showResolveForm, data?.complaint?.status, captureGps]);
+
   if (data === undefined) {
     return (
       <Card>
@@ -343,64 +405,6 @@ function AssignedComplaint({
   const canVerify = ["WORKER_ASSIGNED", "NEEDS_INFO"].includes(c.status);
 
   const canResolve = c.status === "IN_PROGRESS";
-
-  // ---- Mandatory completion-evidence capture (device GPS only) ----
-
-  const captureGps = useCallback(() => {
-    if (!("geolocation" in navigator)) {
-      setGpsStatus("unavailable");
-      setGpsMessage(
-        "Location services are not available on this device/browser. Work cannot be marked completed without a real GPS location.",
-      );
-      return;
-    }
-    setGpsStatus("capturing");
-    setGpsMessage("Capturing your current GPS location…");
-    navigator.geolocation.getCurrentPosition(
-      (pos) => {
-        setGpsCoords({
-          latitude: pos.coords.latitude,
-          longitude: pos.coords.longitude,
-          accuracy: pos.coords.accuracy ?? undefined,
-          capturedAt: pos.timestamp || Date.now(),
-        });
-        setGpsStatus("captured");
-        setGpsMessage(
-          `Location captured (±${Math.round(pos.coords.accuracy ?? 0)} m accuracy) at ${new Date(
-            pos.timestamp || Date.now(),
-          ).toLocaleTimeString()}.`,
-        );
-      },
-      (err) => {
-        if (err.code === err.PERMISSION_DENIED) {
-          setGpsStatus("denied");
-          setGpsMessage(
-            "Location permission was denied. Enable location access in your browser settings — work cannot be marked completed without a real GPS location.",
-          );
-        } else if (err.code === err.POSITION_UNAVAILABLE) {
-          setGpsStatus("unavailable");
-          setGpsMessage(
-            "Your location could not be determined. Move to an open area or enable device location services and try again.",
-          );
-        } else {
-          setGpsStatus("timeout");
-          setGpsMessage("Location capture timed out. Please try again.");
-        }
-      },
-      { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 },
-    );
-  }, []);
-
-  // Fresh capture each time the completion form opens; reset on close.
-  useEffect(() => {
-    if (showResolveForm && canResolve) {
-      setGpsCoords(null);
-      setGpsStatus("idle");
-      setGpsMessage(null);
-      captureGps();
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [showResolveForm, canResolve, captureGps]);
 
   // All required evidence must be provided before WORK COMPLETED unlocks.
   const evidenceComplete =
