@@ -263,8 +263,8 @@ export default function Landing() {
           <DisclaimerNote />
           {staffStats && (
             <p className="text-center text-xs text-muted-foreground">
-              Demo staff IDs — Admin: ADM-01 / admin123 · Worker: WRK-01 / worker123
-              (also WRK-02, WRK-03)
+              Staff sign-in credentials are issued by the water board office —
+              they are never shown on this public page.
             </p>
           )}
         </div>

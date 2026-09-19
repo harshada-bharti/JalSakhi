@@ -221,3 +221,30 @@ export function loadSession(): StaffSession | null {
 export function clearSession() {
   localStorage.removeItem(SESSION_KEY);
 }
+
+// ---------------------------------------------------------------------------
+// Error display helper
+// ---------------------------------------------------------------------------
+
+/**
+ * Turn a failed Convex mutation into a clean, user-facing message.
+ * - ConvexError rejections carry the message in `err.data`.
+ * - Plain server errors arrive wrapped like
+ *   "[Request ID: …] Server Error\nUncaught Error: <message>\n at …" —
+ *   extract just the human-readable part.
+ */
+export function readMutationError(err: unknown): string {
+  const fallback = "Something went wrong. Please try again.";
+  if (err === null || typeof err !== "object") return fallback;
+  const e = err as { data?: unknown; message?: unknown };
+  if (typeof e.data === "string" && e.data.trim()) return e.data;
+  if (typeof e.message !== "string" || !e.message.trim()) return fallback;
+  const uncaught = e.message.match(/Uncaught Error: ([^\n]+)/);
+  if (uncaught) return uncaught[1].trim();
+  const cleaned = e.message
+    .replace(/\[Request ID: [^\]]+\]\s*/g, "")
+    .replace(/\bServer Error\b/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  return cleaned || fallback;
+}

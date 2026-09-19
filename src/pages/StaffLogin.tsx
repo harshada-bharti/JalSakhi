@@ -11,6 +11,7 @@ import { Label } from "@/components/ui/label";
 import { api } from "@/convex/_generated/api";
 import {
   loadSession,
+  readMutationError,
   saveSession,
   type StaffSession,
 } from "@/lib/jalsakhi";
@@ -39,6 +40,15 @@ export default function StaffLogin() {
   const [loading, setLoading] = useState(false);
 
   const login = useMutation(api.staff.login);
+  const ensureDemoData = useMutation(api.staff.ensureDemoData);
+
+  // Make sure demo staff accounts exist and are healthy before the user
+  // submits, so a cold or previously-seeded database never blocks sign-in.
+  useEffect(() => {
+    ensureDemoData().catch(() => {
+      // best-effort; login itself re-runs the bootstrap server-side
+    });
+  }, [ensureDemoData]);
 
   // If already signed in as the right role, go straight to the dashboard.
   useEffect(() => {
@@ -76,7 +86,7 @@ export default function StaffLogin() {
         replace: true,
       });
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Sign in failed. Try again.");
+      setError(readMutationError(err));
       setLoading(false);
     }
   };
