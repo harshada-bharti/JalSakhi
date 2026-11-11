@@ -17,6 +17,9 @@ All relevant files live in the 'src' directory.
 
 Use bun for the package manager.
 
+## LIVE LINK
+https://spicy-glasses-fly.freebuff.dev
+
 ## Setup
 
 This project is set up already and running on a cloud environment, as well as a convex development in the sandbox.
